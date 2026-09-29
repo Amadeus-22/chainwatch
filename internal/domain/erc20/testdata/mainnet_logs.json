@@ -1,0 +1,48 @@
+{
+  "usdc_approval": {
+    "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "topics": [
+      "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+      "0x000000000000000000000000b92fe925dc43a0ecde6c8b1a2709c170ec4fff4f",
+      "0x0000000000000000000000006131b5fae19ea4f9d964eac0408e4408b66337b5"
+    ],
+    "data": "0x00000000000000000000000000000000000000000000000000000002729c259a",
+    "blockNumber": "0x18e0200",
+    "transactionHash": "0xfb86f5eb3708d2834aedf924b1832330dc620a1277d368f8c479cf5af3e1936f",
+    "transactionIndex": "0x24",
+    "blockHash": "0x4abf10e2352dce54344a3d109aa0ec87678bfe7d3af09fd7b6c183d8914eee13",
+    "logIndex": "0x1ee",
+    "removed": false
+  },
+  "usdc_transfer": {
+    "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+    "topics": [
+      "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      "0x000000000000000000000000000000000004444c5dc75cb358380d2e3de08a90",
+      "0x0000000000000000000000000000000aa232009084bd71a5797d089aa4edfad4"
+    ],
+    "data": "0x00000000000000000000000000000000000000000000000000000000000411ca",
+    "blockNumber": "0x18e0200",
+    "transactionHash": "0x3afb69da082ec518c9fe61988bc15fc129bb523db54d6bf7f70d2b869dea78f7",
+    "transactionIndex": "0x0",
+    "blockHash": "0x4abf10e2352dce54344a3d109aa0ec87678bfe7d3af09fd7b6c183d8914eee13",
+    "logIndex": "0x0",
+    "removed": false
+  },
+  "erc721_transfer": {
+    "address": "0xd774557b647330c91bf44cfeab205095f7e6c367",
+    "topics": [
+      "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      "0x000000000000000000000000958c41181182e76f221331b2755b77d9e1426a98",
+      "0x0000000000000000000000006330cdfe9ab3b9f9600f61f9ef5c06477bfd8d58",
+      "0x0000000000000000000000000000000000000000000000000000000000002d9c"
+    ],
+    "data": "0x",
+    "blockNumber": "0x18e0200",
+    "transactionHash": "0x22dcc8b751d38d194f452399e3e649f39e61cd7eaea14d66c6023c9f56c4ba52",
+    "transactionIndex": "0x40",
+    "blockHash": "0x4abf10e2352dce54344a3d109aa0ec87678bfe7d3af09fd7b6c183d8914eee13",
+    "logIndex": "0x292",
+    "removed": false
+  }
+}
