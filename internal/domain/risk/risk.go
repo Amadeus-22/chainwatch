@@ -158,3 +158,13 @@ func DrainPattern(p Params, in Input) []domain.Finding {
 	}
 	return nil
 }
+
+// AllowanceRisk ranks an open allowance for display: unlimited allowances are
+// high risk (a compromised or malicious spender can take the whole balance, now
+// and later); any other non-zero allowance is medium.
+func AllowanceRisk(amount *big.Int) domain.Severity {
+	if amount.Cmp(UnlimitedThreshold) >= 0 {
+		return domain.SeverityHigh
+	}
+	return domain.SeverityMedium
+}

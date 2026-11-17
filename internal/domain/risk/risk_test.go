@@ -175,3 +175,19 @@ func TestEvaluateDrainScenario(t *testing.T) {
 		t.Errorf("benign approval: findings = %v, want none", got)
 	}
 }
+
+func TestAllowanceRisk(t *testing.T) {
+	for _, tt := range []struct {
+		amount *big.Int
+		want   domain.Severity
+	}{
+		{big.NewInt(1), domain.SeverityMedium},
+		{new(big.Int).Sub(risk.UnlimitedThreshold, big.NewInt(1)), domain.SeverityMedium},
+		{risk.UnlimitedThreshold, domain.SeverityHigh},
+		{maxU256, domain.SeverityHigh},
+	} {
+		if got := risk.AllowanceRisk(tt.amount); got != tt.want {
+			t.Errorf("AllowanceRisk(%s) = %s, want %s", tt.amount, got, tt.want)
+		}
+	}
+}

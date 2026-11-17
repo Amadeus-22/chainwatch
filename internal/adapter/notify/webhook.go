@@ -27,6 +27,8 @@ func NewWebhook(url string, opts Options) *Webhook {
 type WebhookPayload struct {
 	DedupKey    string          `json:"dedup_key"`
 	AlertID     int64           `json:"alert_id"`
+	OrgID       domain.OrgID    `json:"org_id"`
+	ChainID     domain.ChainID  `json:"chain_id"`
 	Wallet      domain.Address  `json:"wallet"`
 	Rule        string          `json:"rule"`
 	Severity    domain.Severity `json:"severity"`
@@ -41,7 +43,7 @@ type WebhookPayload struct {
 // Notify sends the alert.
 func (w *Webhook) Notify(ctx context.Context, a domain.Alert) error {
 	body, err := json.Marshal(WebhookPayload{
-		DedupKey: a.DedupKey(), AlertID: a.ID, Wallet: a.Wallet, Rule: a.Rule, Severity: a.Severity,
+		DedupKey: a.DedupKey(), AlertID: a.ID, OrgID: a.OrgID, ChainID: a.ChainID, Wallet: a.Wallet, Rule: a.Rule, Severity: a.Severity,
 		Reason: a.Reason, Token: a.Token, TxHash: a.TxHash, LogIndex: a.LogIndex,
 		BlockNumber: a.BlockNumber, CreatedAt: a.CreatedAt,
 	})

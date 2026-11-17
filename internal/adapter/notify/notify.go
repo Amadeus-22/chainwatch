@@ -107,7 +107,8 @@ func NewLog(log *slog.Logger) *Log { return &Log{log: log} }
 
 // Notify logs the alert at warn level.
 func (l *Log) Notify(_ context.Context, a domain.Alert) error {
-	l.log.Warn("ALERT", "rule", a.Rule, "severity", string(a.Severity), "wallet", a.Wallet.String(),
+	l.log.Warn("ALERT", "rule", a.Rule, "severity", string(a.Severity), "org_id", int64(a.OrgID),
+		"chain_id", uint64(a.ChainID), "wallet", a.Wallet.String(),
 		"token", a.Token.String(), "tx", a.TxHash.String(), "block", a.BlockNumber, "reason", a.Reason)
 	return nil
 }

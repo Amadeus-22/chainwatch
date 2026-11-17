@@ -53,7 +53,7 @@ func node(t *testing.T, replies map[string]string, seen *[]request) *httptest.Se
 
 func newClient(url string) (*ethrpc.Client, *metrics.Metrics) {
 	m := metrics.New(prometheus.NewRegistry())
-	return ethrpc.New(url, time.Second, m), m
+	return ethrpc.New(url, 31337, time.Second, m), m
 }
 
 // A real anvil log from contracts/script/Drain.s.sol (the unlimited approval).
@@ -117,7 +117,7 @@ func TestLogsMapsRangeRefusals(t *testing.T) {
 		if !errors.Is(err, domain.ErrRangeTooLarge) {
 			t.Errorf("reply %s: err = %v, want ErrRangeTooLarge", reply, err)
 		}
-		if got := testutil.ToFloat64(m.RPCErrors.WithLabelValues("eth_getLogs")); got != 1 {
+		if got := testutil.ToFloat64(m.RPCErrors.WithLabelValues("31337", "eth_getLogs")); got != 1 {
 			t.Errorf("rpc_errors_total = %v, want 1", got)
 		}
 	}
@@ -192,7 +192,7 @@ func TestHTTPFailureAndTimeout(t *testing.T) {
 	if _, err := c.BlockNumber(context.Background()); err == nil || !strings.Contains(err.Error(), "502") {
 		t.Errorf("502: err = %v", err)
 	}
-	if got := testutil.ToFloat64(m.RPCErrors.WithLabelValues("eth_blockNumber")); got != 1 {
+	if got := testutil.ToFloat64(m.RPCErrors.WithLabelValues("31337", "eth_blockNumber")); got != 1 {
 		t.Errorf("rpc_errors_total = %v", got)
 	}
 
@@ -200,12 +200,25 @@ func TestHTTPFailureAndTimeout(t *testing.T) {
 	slow := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
 	defer slow.Close()
 	defer close(release)
-	c = ethrpc.New(slow.URL, 50*time.Millisecond, metrics.New(prometheus.NewRegistry()))
+	c = ethrpc.New(slow.URL, 31337, 50*time.Millisecond, metrics.New(prometheus.NewRegistry()))
 	start := time.Now()
 	if _, err := c.BlockNumber(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("slow node: err = %v, want deadline exceeded", err)
 	}
 	if time.Since(start) > time.Second {
 		t.Error("timeout not enforced")
+	}
+}
+
+func TestPingChecksChainID(t *testing.T) {
+	anvil := node(t, map[string]string{"eth_chainId": `"result":"0x7a69"`}, nil)
+	c, _ := newClient(anvil.URL)
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping on the configured chain: %v", err)
+	}
+	mainnet := node(t, map[string]string{"eth_chainId": `"result":"0x1"`}, nil)
+	c, _ = newClient(mainnet.URL)
+	if err := c.Ping(context.Background()); err == nil || !strings.Contains(err.Error(), "chain id 1, configured 31337") {
+		t.Fatalf("Ping on the wrong chain: err = %v", err)
 	}
 }

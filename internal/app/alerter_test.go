@@ -44,7 +44,7 @@ func seedAlerts(t *testing.T, s *fakeStore, n int) {
 	t.Helper()
 	var alerts []domain.Alert
 	for i := range n {
-		alerts = append(alerts, domain.NewAlert(victim, domain.Event{TxHash: domain.Hash{byte(i + 1)}},
+		alerts = append(alerts, domain.NewAlert(testOrg, testChain, victim, domain.Event{TxHash: domain.Hash{byte(i + 1)}},
 			domain.Finding{Rule: "unlimited_approval", Severity: domain.SeverityHigh}))
 	}
 	if err := s.CommitRange(context.Background(), app.RangeResult{Alerts: alerts}); err != nil {
