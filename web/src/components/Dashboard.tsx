@@ -32,6 +32,7 @@ export function Dashboard({ me, chains, wallet }: { me: Me; chains: Chain[]; wal
   const [members, setMembers] = useState<Member[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState<Tab>("wallets");
 
   const org = orgs.find((o) => o.id === orgId);
   const chainById = useMemo(() => new Map(chains.map((c) => [c.id, c])), [chains]);
@@ -97,26 +98,53 @@ export function Dashboard({ me, chains, wallet }: { me: Me; chains: Chain[]; wal
     .map((c) => ({ chain: c, wallets: wallets.filter((w) => w.chain_id === c.id) }))
     .filter((g) => g.wallets.length > 0);
 
+  const critical = alerts.filter((a) => a.severity === "critical").length;
+  const watchedChains = byChain.map((g) => g.chain.name);
+  const tabs: { id: Tab; label: string; count: number; alert?: boolean }[] = [
+    { id: "wallets", label: "Wallets", count: wallets.length },
+    { id: "alerts", label: "Alerts", count: alerts.length, alert: critical > 0 },
+    { id: "members", label: "Members", count: members.length },
+  ];
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <label className="text-sm text-slate-600" htmlFor="org">
-          Organization
-        </label>
-        <select
-          id="org"
-          value={org.id}
-          onChange={(e) => setOrgId(Number(e.target.value))}
-          className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm"
-        >
-          {orgs.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.name} ({o.role})
-            </option>
-          ))}
-        </select>
-        <CreateOrg compact onCreated={(o) => (setOrgs((x) => [...x, o]), setOrgId(o.id))} onError={(e) => say("error", e)} />
-      </div>
+      <section className="flex flex-wrap items-end justify-between gap-4">
+        <div className="border-l-4 border-teal-400 pl-4">
+          <div className="text-xs text-slate-500">Organization</div>
+          <h2 className="mt-0.5 mb-2 text-2xl font-bold tracking-tight">{org.name}</h2>
+          <div className="flex flex-wrap gap-1.5">
+            <Chip>{org.role}</Chip>
+            <Chip>
+              {watchedChains.length || chains.length} {(watchedChains.length || chains.length) === 1 ? "chain" : "chains"}
+            </Chip>
+            {critical > 0 ? (
+              <Chip tone="bad">
+                {critical} critical {critical === 1 ? "alert" : "alerts"}
+              </Chip>
+            ) : (
+              <Chip tone="good">no critical alerts</Chip>
+            )}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="grid gap-1 text-xs text-slate-500" htmlFor="org">
+            Switch organization
+            <select
+              id="org"
+              value={org.id}
+              onChange={(e) => setOrgId(Number(e.target.value))}
+              className="min-w-56 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900"
+            >
+              {orgs.map((o) => (
+                <option key={o.id} value={o.id}>
+                  {o.name} ({o.role})
+                </option>
+              ))}
+            </select>
+          </label>
+          <CreateOrg compact onCreated={(o) => (setOrgs((x) => [...x, o]), setOrgId(o.id))} onError={(e) => say("error", e)} />
+        </div>
+      </section>
 
       {messages.map((m, i) => (
         <Notice key={i} tone={m.tone} onClose={() => setMessages((all) => all.filter((_, j) => j !== i))}>
@@ -126,7 +154,41 @@ export function Dashboard({ me, chains, wallet }: { me: Me; chains: Chain[]; wal
 
       <Summary wallets={wallets} allowances={allowances} alerts={alerts} />
 
-      <Card title="Watched wallets" actions={<AddWallet orgId={org.id} chains={chains} wallet={wallet} onAdded={load} onError={(e) => say("error", e)} />}>
+      <div>
+        <p className="mb-1.5 text-xs tracking-wide text-slate-500 uppercase">Organization structure</p>
+        <div className="grid gap-2.5 md:grid-cols-2">
+          <div className="grid grid-cols-2 gap-4 rounded-lg bg-slate-100 px-5 py-4 sm:grid-cols-3">
+            <Field label="Signed in as" value={<Mono>{shortAddress(me.address)}</Mono>} />
+            <Field label="Your role" value={org.role} />
+            <Field label="Members" value={String(members.length)} />
+          </div>
+          <div className="grid grid-cols-2 gap-4 rounded-lg bg-slate-100 px-5 py-4 sm:grid-cols-3">
+            <Field label="Networks watched" value={watchedChains.join(", ") || "none yet"} />
+            <Field label="Networks available" value={String(chains.length)} />
+            <Field label="Revoke" value="from the owner's wallet" />
+          </div>
+        </div>
+      </div>
+
+      <div role="tablist" className="flex gap-1 overflow-x-auto border-b border-slate-200">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={tab === t.id}
+            onClick={() => setTab(t.id)}
+            className={`-mb-px border-b-[3px] px-4 py-3 text-sm tracking-wide whitespace-nowrap uppercase ${
+              tab === t.id ? "border-indigo-600 text-indigo-700" : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            {t.label} <span className="text-slate-400">{t.count}</span>
+            {t.alert && <span className="ml-1.5 inline-block h-2 w-2 rounded-full bg-rose-500 align-middle" aria-label="critical alerts" />}
+          </button>
+        ))}
+      </div>
+
+      {tab === "wallets" && (
+        <Card title="Watched wallets" actions={<AddWallet orgId={org.id} chains={chains} wallet={wallet} onAdded={load} onError={(e) => say("error", e)} />}>
         {!loaded ? (
           <p className="text-sm text-slate-500">Loading…</p>
         ) : byChain.length === 0 ? (
@@ -162,7 +224,10 @@ export function Dashboard({ me, chains, wallet }: { me: Me; chains: Chain[]; wal
         )}
       </Card>
 
-      <Card title="Alerts">
+      )}
+
+      {tab === "alerts" && (
+        <Card title="Alerts">
         {alerts.length === 0 ? (
           <p className="text-sm text-slate-500">No alerts. Risky approvals and drains on watched wallets appear here.</p>
         ) : (
@@ -209,7 +274,27 @@ export function Dashboard({ me, chains, wallet }: { me: Me; chains: Chain[]; wal
         )}
       </Card>
 
-      <Members orgId={org.id} isOwner={org.role === "owner"} me={me.address} members={members} onChanged={load} onError={(e) => say("error", e)} />
+      )}
+
+      {tab === "members" && (
+  <Members orgId={org.id} isOwner={org.role === "owner"} me={me.address} members={members} onChanged={load} onError={(e) => say("error", e)} />
+      )}
+    </div>
+  );
+}
+
+type Tab = "wallets" | "alerts" | "members";
+
+function Chip({ children, tone }: { children: ReactNode; tone?: "good" | "bad" }) {
+  const styles = tone === "bad" ? "bg-rose-50 text-rose-700" : tone === "good" ? "bg-emerald-50 text-emerald-700" : "bg-slate-200/70 text-slate-700";
+  return <span className={`rounded px-2 py-0.5 text-[11px] font-semibold tracking-wide uppercase ${styles}`}>{children}</span>;
+}
+
+function Field({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="grid gap-0.5 text-sm">
+      <span className="text-xs font-semibold text-slate-700">{label}</span>
+      <span className="text-slate-800">{value}</span>
     </div>
   );
 }
@@ -218,17 +303,18 @@ function Summary({ wallets, allowances, alerts }: { wallets: Wallet[]; allowance
   const unlimited = allowances.filter((a) => a.unlimited).length;
   const critical = alerts.filter((a) => a.severity === "critical").length;
   const stats = [
-    { label: "Watched wallets", value: wallets.length },
-    { label: "Open allowances", value: allowances.length },
-    { label: "Unlimited allowances", value: unlimited, warn: unlimited > 0 },
-    { label: "Critical alerts", value: critical, warn: critical > 0 },
+    { label: "Watched wallets", value: wallets.length, sub: "across all networks" },
+    { label: "Open allowances", value: allowances.length, sub: "who can move tokens now" },
+    { label: "Unlimited allowances", value: unlimited, warn: unlimited > 0, sub: "highest exposure" },
+    { label: "Critical alerts", value: critical, warn: critical > 0, sub: "drain patterns" },
   ];
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
       {stats.map((s) => (
-        <div key={s.label} className="rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
-          <div className="text-xs text-slate-500">{s.label}</div>
-          <div className={`text-2xl font-semibold ${s.warn ? "text-rose-600" : ""}`}>{s.value}</div>
+        <div key={s.label} className="rounded-md border border-slate-200 bg-white px-4 py-3.5 shadow-sm">
+          <div className="text-sm text-slate-500">{s.label}</div>
+          <div className={`text-2xl font-bold tabular-nums ${s.warn ? "text-rose-600" : ""}`}>{s.value}</div>
+          <div className="text-[11px] text-slate-500">{s.sub}</div>
         </div>
       ))}
     </div>

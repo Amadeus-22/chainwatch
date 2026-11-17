@@ -4,9 +4,11 @@ Allowance and drain monitoring for treasuries, funds and DAOs: see who can move
 your organization's tokens on every EVM chain you use, get alerted when a risky
 approval lands, and revoke it from the browser with MetaMask.
 
-![chainwatch dashboard after the end-to-end demo: one watched wallet with an unlimited allowance to an externally owned account, and the four alerts raised when the attacker drained it](docs/images/dashboard.png)
+![chainwatch organization page after the end-to-end demo: headline counts, the organization structure, and the Wallets tab with an unlimited allowance to an externally owned account and a Revoke button](docs/images/dashboard.png)
 
 <sub>The dashboard after `make demo`: a wallet signs an unlimited approval to an attacker's EOA and is drained; chainwatch raises four alerts and offers to revoke.</sub>
+
+![Alerts tab: the four alerts raised by the drain, from the unlimited approval to the drain pattern](docs/images/alerts.png)
 
 ## Problem
 
