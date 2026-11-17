@@ -1,5 +1,5 @@
-// Package postgres implements app.Store (and the API's queries) on PostgreSQL
-// with pgx. Every multi-row change runs in one transaction.
+// Package postgres implements app.Store, app.AuthStore and app.OrgStore on
+// PostgreSQL with pgx. Every multi-row change runs in one transaction.
 package postgres
 
 import (
@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"math/big"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,7 +24,11 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
-var _ app.Store = (*Store)(nil)
+var (
+	_ app.Store     = (*Store)(nil)
+	_ app.AuthStore = (*Store)(nil)
+	_ app.OrgStore  = (*Store)(nil)
+)
 
 // Open connects and verifies the connection.
 func Open(ctx context.Context, url string) (*Store, error) {
@@ -87,80 +90,28 @@ func (s *Store) Migrate(ctx context.Context) error {
 	})
 }
 
-// --- wallets ---
-
-// AddWallet puts addr on the watch list. created is false if it was already there
-// (the existing wallet is returned unchanged).
-func (s *Store) AddWallet(ctx context.Context, addr domain.Address, label string) (w domain.Wallet, created bool, err error) {
-	row := s.pool.QueryRow(ctx, `
-		INSERT INTO wallets (address, label) VALUES ($1, $2)
-		ON CONFLICT (address) DO NOTHING
-		RETURNING label, created_at`, addr[:], label)
-	w.Address = addr
-	err = row.Scan(&w.Label, &w.CreatedAt)
-	if err == nil {
-		return w, true, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return domain.Wallet{}, false, fmt.Errorf("insert wallet %s: %w", addr, err)
-	}
-	w, err = s.Wallet(ctx, addr)
-	return w, false, err
-}
-
-// Wallet returns one watched wallet or domain.ErrNotFound.
-func (s *Store) Wallet(ctx context.Context, addr domain.Address) (domain.Wallet, error) {
-	w := domain.Wallet{Address: addr}
-	err := s.pool.QueryRow(ctx, "SELECT label, created_at FROM wallets WHERE address = $1", addr[:]).Scan(&w.Label, &w.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Wallet{}, fmt.Errorf("wallet %s: %w", addr, domain.ErrNotFound)
-	}
+// WatchedWallets returns every (organization, address) pair watched on chain.
+func (s *Store) WatchedWallets(ctx context.Context, chain domain.ChainID) ([]domain.Wallet, error) {
+	rows, err := s.pool.Query(ctx, `SELECT `+walletColumns+` FROM watched_wallets
+		WHERE chain_id = $1 ORDER BY address, org_id`, int64(chain))
 	if err != nil {
-		return domain.Wallet{}, fmt.Errorf("select wallet %s: %w", addr, err)
+		return nil, fmt.Errorf("select wallets on chain %d: %w", chain, err)
 	}
-	return w, nil
-}
-
-// RemoveWallet takes addr off the watch list. Its history is kept.
-func (s *Store) RemoveWallet(ctx context.Context, addr domain.Address) error {
-	tag, err := s.pool.Exec(ctx, "DELETE FROM wallets WHERE address = $1", addr[:])
-	if err != nil {
-		return fmt.Errorf("delete wallet %s: %w", addr, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("wallet %s: %w", addr, domain.ErrNotFound)
-	}
-	return nil
-}
-
-// Wallets lists the watch list, oldest first.
-func (s *Store) Wallets(ctx context.Context) ([]domain.Wallet, error) {
-	rows, err := s.pool.Query(ctx, "SELECT address, label, created_at FROM wallets ORDER BY created_at, address")
-	if err != nil {
-		return nil, fmt.Errorf("select wallets: %w", err)
-	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (domain.Wallet, error) {
-		var w domain.Wallet
-		var a []byte
-		if err := r.Scan(&a, &w.Label, &w.CreatedAt); err != nil {
-			return w, err
-		}
-		return w, copyInto(w.Address[:], a)
-	})
+	return pgx.CollectRows(rows, scanWallet)
 }
 
 // --- indexing ---
 
-// Checkpoint returns the last committed block.
-func (s *Store) Checkpoint(ctx context.Context) (domain.Checkpoint, bool, error) {
+// Checkpoint returns the chain's last committed block.
+func (s *Store) Checkpoint(ctx context.Context, chain domain.ChainID) (domain.Checkpoint, bool, error) {
 	var cp domain.Checkpoint
 	var h []byte
-	err := s.pool.QueryRow(ctx, "SELECT block_number, block_hash FROM checkpoint").Scan(&cp.Block, &h)
+	err := s.pool.QueryRow(ctx, "SELECT block_number, block_hash FROM checkpoints WHERE chain_id = $1", int64(chain)).Scan(&cp.Block, &h)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Checkpoint{}, false, nil
 	}
 	if err != nil {
-		return domain.Checkpoint{}, false, fmt.Errorf("select checkpoint: %w", err)
+		return domain.Checkpoint{}, false, fmt.Errorf("select checkpoint of chain %d: %w", chain, err)
 	}
 	return cp, true, copyInto(cp.Hash[:], h)
 }
@@ -168,10 +119,10 @@ func (s *Store) Checkpoint(ctx context.Context) (domain.Checkpoint, bool, error)
 const eventColumns = "tx_hash, log_index, block_number, block_hash, kind, token, from_addr, to_addr, amount::text"
 
 // ApprovalsSince returns owner's approvals on token from fromBlock on, in chain order.
-func (s *Store) ApprovalsSince(ctx context.Context, owner, token domain.Address, fromBlock uint64) ([]domain.Event, error) {
+func (s *Store) ApprovalsSince(ctx context.Context, chain domain.ChainID, owner, token domain.Address, fromBlock uint64) ([]domain.Event, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+eventColumns+` FROM events
-		WHERE kind = 'approval' AND from_addr = $1 AND token = $2 AND block_number >= $3
-		ORDER BY block_number, log_index`, owner[:], token[:], fromBlock)
+		WHERE chain_id = $1 AND kind = 'approval' AND from_addr = $2 AND token = $3 AND block_number >= $4
+		ORDER BY block_number, log_index`, int64(chain), owner[:], token[:], fromBlock)
 	if err != nil {
 		return nil, fmt.Errorf("select approvals of %s on %s: %w", owner, token, err)
 	}
@@ -180,51 +131,57 @@ func (s *Store) ApprovalsSince(ctx context.Context, owner, token domain.Address,
 
 // CommitRange stores a range's events, allowances, alerts and checkpoint atomically.
 func (s *Store) CommitRange(ctx context.Context, r app.RangeResult) error {
+	chain := int64(r.ChainID)
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		b := &pgx.Batch{}
 		for _, e := range r.Events {
-			b.Queue(`INSERT INTO events (tx_hash, log_index, block_number, block_hash, kind, token, from_addr, to_addr, amount)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::text::numeric)
-				ON CONFLICT (tx_hash, log_index) DO NOTHING`,
-				e.TxHash[:], e.LogIndex, e.BlockNumber, e.BlockHash[:], string(e.Kind), e.Token[:], e.From[:], e.To[:], e.Amount.String())
+			b.Queue(`INSERT INTO events (chain_id, tx_hash, log_index, block_number, block_hash, kind, token, from_addr, to_addr, amount)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::text::numeric)
+				ON CONFLICT (chain_id, tx_hash, log_index) DO NOTHING`,
+				chain, e.TxHash[:], e.LogIndex, e.BlockNumber, e.BlockHash[:], string(e.Kind), e.Token[:], e.From[:], e.To[:], e.Amount.String())
 			if e.Kind == domain.KindApproval {
-				b.Queue(`INSERT INTO allowances (owner, token, spender, amount, updated_block, updated_log_index)
-					VALUES ($1, $2, $3, $4::text::numeric, $5, $6)
-					ON CONFLICT (owner, token, spender) DO UPDATE
+				b.Queue(`INSERT INTO allowances (chain_id, owner, token, spender, amount, updated_block, updated_log_index)
+					VALUES ($1, $2, $3, $4, $5::text::numeric, $6, $7)
+					ON CONFLICT (chain_id, owner, token, spender) DO UPDATE
 					SET amount = EXCLUDED.amount, updated_block = EXCLUDED.updated_block, updated_log_index = EXCLUDED.updated_log_index
 					WHERE (allowances.updated_block, allowances.updated_log_index) <= (EXCLUDED.updated_block, EXCLUDED.updated_log_index)`,
-					e.From[:], e.Token[:], e.To[:], e.Amount.String(), e.BlockNumber, e.LogIndex)
+					chain, e.From[:], e.Token[:], e.To[:], e.Amount.String(), e.BlockNumber, e.LogIndex)
 			}
 		}
 		for _, a := range r.Alerts {
-			b.Queue(`INSERT INTO alerts (wallet, rule, severity, reason, token, tx_hash, log_index, block_number)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-				ON CONFLICT (rule, tx_hash, log_index) DO NOTHING`,
-				a.Wallet[:], a.Rule, string(a.Severity), a.Reason, a.Token[:], a.TxHash[:], a.LogIndex, a.BlockNumber)
+			// The organization may have been deleted since the range started:
+			// insert only while it exists, instead of failing the whole range.
+			b.Queue(`INSERT INTO alerts (org_id, chain_id, wallet, rule, severity, reason, token, tx_hash, log_index, block_number)
+				SELECT $1::bigint, $2::bigint, $3::bytea, $4::text, $5::text, $6::text, $7::bytea, $8::bytea, $9::integer, $10::bigint
+				WHERE EXISTS (SELECT 1 FROM organizations WHERE id = $1::bigint)
+				ON CONFLICT (org_id, chain_id, rule, tx_hash, log_index) DO NOTHING`,
+				int64(a.OrgID), int64(a.ChainID), a.Wallet[:], a.Rule, string(a.Severity), a.Reason, a.Token[:], a.TxHash[:], a.LogIndex, a.BlockNumber)
 		}
-		b.Queue(`INSERT INTO checkpoint (block_number, block_hash) VALUES ($1, $2)
-			ON CONFLICT (id) DO UPDATE SET block_number = EXCLUDED.block_number, block_hash = EXCLUDED.block_hash, updated_at = now()`,
-			r.Checkpoint.Block, r.Checkpoint.Hash[:])
+		b.Queue(upsertCheckpoint, chain, r.Checkpoint.Block, r.Checkpoint.Hash[:])
 		return tx.SendBatch(ctx, b).Close()
 	})
 	if err != nil {
-		return fmt.Errorf("commit range up to block %d: %w", r.Checkpoint.Block, err)
+		return fmt.Errorf("commit chain %d range up to block %d: %w", r.ChainID, r.Checkpoint.Block, err)
 	}
 	return nil
 }
 
+const upsertCheckpoint = `INSERT INTO checkpoints (chain_id, block_number, block_hash) VALUES ($1, $2, $3)
+	ON CONFLICT (chain_id) DO UPDATE SET block_number = EXCLUDED.block_number, block_hash = EXCLUDED.block_hash, updated_at = now()`
+
 // Rewind drops everything derived from blocks above to.Block and moves the
 // checkpoint there. Allowances last set above to.Block are rebuilt from the
 // latest surviving approval; delivered alerts are kept (they were already sent).
-func (s *Store) Rewind(ctx context.Context, to domain.Checkpoint) error {
+func (s *Store) Rewind(ctx context.Context, chainID domain.ChainID, to domain.Checkpoint) error {
+	chain := int64(chainID)
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "DELETE FROM events WHERE block_number > $1", to.Block); err != nil {
+		if _, err := tx.Exec(ctx, "DELETE FROM events WHERE chain_id = $1 AND block_number > $2", chain, to.Block); err != nil {
 			return fmt.Errorf("delete events: %w", err)
 		}
-		if _, err := tx.Exec(ctx, "DELETE FROM alerts WHERE block_number > $1 AND status = 'pending'", to.Block); err != nil {
+		if _, err := tx.Exec(ctx, "DELETE FROM alerts WHERE chain_id = $1 AND block_number > $2 AND status = 'pending'", chain, to.Block); err != nil {
 			return fmt.Errorf("delete pending alerts: %w", err)
 		}
-		rows, err := tx.Query(ctx, "DELETE FROM allowances WHERE updated_block > $1 RETURNING owner, token, spender", to.Block)
+		rows, err := tx.Query(ctx, "DELETE FROM allowances WHERE chain_id = $1 AND updated_block > $2 RETURNING owner, token, spender", chain, to.Block)
 		if err != nil {
 			return fmt.Errorf("delete allowances: %w", err)
 		}
@@ -242,56 +199,32 @@ func (s *Store) Rewind(ctx context.Context, to domain.Checkpoint) error {
 		}
 		if len(owners) > 0 {
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO allowances (owner, token, spender, amount, updated_block, updated_log_index)
+				INSERT INTO allowances (chain_id, owner, token, spender, amount, updated_block, updated_log_index)
 				SELECT DISTINCT ON (e.from_addr, e.token, e.to_addr)
-				       e.from_addr, e.token, e.to_addr, e.amount, e.block_number, e.log_index
+				       e.chain_id, e.from_addr, e.token, e.to_addr, e.amount, e.block_number, e.log_index
 				FROM events e
-				JOIN unnest($1::bytea[], $2::bytea[], $3::bytea[]) AS k(owner, token, spender)
+				JOIN unnest($2::bytea[], $3::bytea[], $4::bytea[]) AS k(owner, token, spender)
 				  ON e.from_addr = k.owner AND e.token = k.token AND e.to_addr = k.spender
-				WHERE e.kind = 'approval'
+				WHERE e.chain_id = $1 AND e.kind = 'approval'
 				ORDER BY e.from_addr, e.token, e.to_addr, e.block_number DESC, e.log_index DESC`,
-				owners, tokens, spenders); err != nil {
+				chain, owners, tokens, spenders); err != nil {
 				return fmt.Errorf("rebuild allowances: %w", err)
 			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO checkpoint (block_number, block_hash) VALUES ($1, $2)
-			ON CONFLICT (id) DO UPDATE SET block_number = EXCLUDED.block_number, block_hash = EXCLUDED.block_hash, updated_at = now()`,
-			to.Block, to.Hash[:]); err != nil {
+		if _, err := tx.Exec(ctx, upsertCheckpoint, chain, to.Block, to.Hash[:]); err != nil {
 			return fmt.Errorf("set checkpoint: %w", err)
 		}
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("rewind to block %d: %w", to.Block, err)
+		return fmt.Errorf("rewind chain %d to block %d: %w", chainID, to.Block, err)
 	}
 	return nil
 }
 
-// Allowances returns owner's non-zero allowances, most recently changed first.
-func (s *Store) Allowances(ctx context.Context, owner domain.Address) ([]domain.Allowance, error) {
-	rows, err := s.pool.Query(ctx, `SELECT token, spender, amount::text, updated_block FROM allowances
-		WHERE owner = $1 AND amount > 0 ORDER BY updated_block DESC, token, spender`, owner[:])
-	if err != nil {
-		return nil, fmt.Errorf("select allowances of %s: %w", owner, err)
-	}
-	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (domain.Allowance, error) {
-		a := domain.Allowance{Owner: owner}
-		var token, spender []byte
-		var amount string
-		if err := r.Scan(&token, &spender, &amount, &a.UpdatedBlock); err != nil {
-			return a, err
-		}
-		var err error
-		if a.Amount, err = parseAmount(amount); err != nil {
-			return a, err
-		}
-		return a, errors.Join(copyInto(a.Token[:], token), copyInto(a.Spender[:], spender))
-	})
-}
-
 // --- alerts ---
 
-const alertColumns = `id, wallet, rule, severity, reason, token, tx_hash, log_index, block_number,
+const alertColumns = `id, org_id, chain_id, wallet, rule, severity, reason, token, tx_hash, log_index, block_number,
 	status, attempts, created_at, delivered_at`
 
 // PendingAlerts returns due pending alerts, oldest first.
@@ -300,31 +233,6 @@ func (s *Store) PendingAlerts(ctx context.Context, now time.Time, limit int) ([]
 		WHERE status = 'pending' AND next_attempt_at <= $1 ORDER BY id LIMIT $2`, now, limit)
 	if err != nil {
 		return nil, fmt.Errorf("select pending alerts: %w", err)
-	}
-	return pgx.CollectRows(rows, scanAlert)
-}
-
-// Alerts returns alerts matching q, newest first.
-func (s *Store) Alerts(ctx context.Context, q app.AlertQuery) ([]domain.Alert, error) {
-	var where []string
-	var args []any
-	if q.Wallet != nil {
-		args = append(args, q.Wallet[:])
-		where = append(where, fmt.Sprintf("wallet = $%d", len(args)))
-	}
-	if !q.Since.IsZero() {
-		args = append(args, q.Since)
-		where = append(where, fmt.Sprintf("created_at >= $%d", len(args)))
-	}
-	sql := `SELECT ` + alertColumns + ` FROM alerts`
-	if len(where) > 0 {
-		sql += " WHERE " + strings.Join(where, " AND ")
-	}
-	args = append(args, q.Limit)
-	sql += fmt.Sprintf(" ORDER BY created_at DESC, id DESC LIMIT $%d", len(args))
-	rows, err := s.pool.Query(ctx, sql, args...)
-	if err != nil {
-		return nil, fmt.Errorf("select alerts: %w", err)
 	}
 	return pgx.CollectRows(rows, scanAlert)
 }
@@ -383,10 +291,12 @@ func scanAlert(r pgx.CollectableRow) (domain.Alert, error) {
 	var a domain.Alert
 	var wallet, token, tx []byte
 	var severity, status string
-	if err := r.Scan(&a.ID, &wallet, &a.Rule, &severity, &a.Reason, &token, &tx, &a.LogIndex, &a.BlockNumber,
+	var org, chain int64
+	if err := r.Scan(&a.ID, &org, &chain, &wallet, &a.Rule, &severity, &a.Reason, &token, &tx, &a.LogIndex, &a.BlockNumber,
 		&status, &a.Attempts, &a.CreatedAt, &a.DeliveredAt); err != nil {
 		return a, err
 	}
+	a.OrgID, a.ChainID = domain.OrgID(org), domain.ChainID(chain)
 	a.Severity, a.Status = domain.Severity(severity), domain.AlertStatus(status)
 	return a, errors.Join(copyInto(a.Wallet[:], wallet), copyInto(a.Token[:], token), copyInto(a.TxHash[:], tx))
 }

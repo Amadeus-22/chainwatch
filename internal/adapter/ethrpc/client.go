@@ -31,13 +31,17 @@ type Client struct {
 	timeout time.Duration
 	m       *metrics.Metrics
 	id      atomic.Uint64
+	chainID domain.ChainID
+	label   string // chain id as a metric label value
 }
 
 var _ app.Chain = (*Client)(nil)
 
-// New returns a client for url. timeout bounds every call.
-func New(url string, timeout time.Duration, m *metrics.Metrics) *Client {
-	return &Client{url: url, http: &http.Client{}, timeout: timeout, m: m}
+// New returns a client for the node at url, which must serve chainID. timeout
+// bounds every call.
+func New(url string, chainID domain.ChainID, timeout time.Duration, m *metrics.Metrics) *Client {
+	return &Client{url: url, http: &http.Client{}, timeout: timeout, m: m,
+		chainID: chainID, label: strconv.FormatUint(uint64(chainID), 10)}
 }
 
 // RPCError is an error object returned by the node.
@@ -132,16 +136,24 @@ func (c *Client) TxSender(ctx context.Context, tx domain.Hash) (domain.Address, 
 	return t.From, nil
 }
 
-// Ping checks the endpoint is reachable (used by /readyz).
+// Ping checks the endpoint is reachable and serves the configured chain (used by
+// /readyz): an RPC URL pointing at the wrong network would otherwise index the
+// wrong chain silently.
 func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.BlockNumber(ctx)
-	return err
+	var q quantity
+	if err := c.call(ctx, "eth_chainId", nil, &q); err != nil {
+		return err
+	}
+	if domain.ChainID(q) != c.chainID {
+		return fmt.Errorf("node serves chain id %d, configured %d", uint64(q), c.chainID)
+	}
+	return nil
 }
 
 func (c *Client) call(ctx context.Context, method string, params []any, result any) (err error) {
 	defer func() {
 		if err != nil {
-			c.m.RPCErrors.WithLabelValues(method).Inc()
+			c.m.RPCErrors.WithLabelValues(c.label, method).Inc()
 			err = fmt.Errorf("%s: %w", method, err)
 		}
 	}()

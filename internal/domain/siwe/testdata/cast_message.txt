@@ -1,0 +1,11 @@
+app.chainwatch.example wants you to sign in with your Ethereum account:
+0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+
+Sign in to chainwatch.
+
+URI: https://app.chainwatch.example
+Version: 1
+Chain ID: 8453
+Nonce: 3f9a1c0b7e2d4a6f
+Issued At: 2026-09-29T12:00:00Z
+Expiration Time: 2026-09-29T12:10:00Z

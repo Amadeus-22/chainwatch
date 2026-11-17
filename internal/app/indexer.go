@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/Amadeus-22/chainwatch/internal/domain"
@@ -18,6 +19,7 @@ import (
 
 // IndexerConfig tunes the indexer. See the README configuration table.
 type IndexerConfig struct {
+	ChainID       domain.ChainID
 	Confirmations uint64
 	ReorgWindow   uint64
 	MaxBlockRange uint64
@@ -26,8 +28,9 @@ type IndexerConfig struct {
 	Risk          risk.Params
 }
 
-// Indexer follows the chain `Confirmations` blocks behind head and turns ERC-20
-// logs that involve watched wallets into events, allowances and alerts.
+// Indexer follows one chain `Confirmations` blocks behind head and turns ERC-20
+// logs that involve wallets watched on that chain into events, allowances and
+// alerts. The process runs one Indexer per configured chain.
 type Indexer struct {
 	chain Chain
 	store Store
@@ -35,6 +38,7 @@ type Indexer struct {
 	log   *slog.Logger
 	m     *metrics.Metrics
 	retry backoff.Policy
+	label string // chain id as a metric label value
 
 	// span is the current eth_getLogs range size. It halves when the node refuses
 	// a range and doubles back towards MaxBlockRange after each success.
@@ -51,6 +55,7 @@ func NewIndexer(chain Chain, store Store, cfg IndexerConfig, log *slog.Logger, m
 		m:     m,
 		retry: backoff.Policy{Base: cfg.PollInterval, Max: 2 * time.Minute},
 		span:  cfg.MaxBlockRange,
+		label: strconv.FormatUint(uint64(cfg.ChainID), 10),
 	}
 }
 
@@ -104,8 +109,8 @@ func (ix *Indexer) Sync(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		ix.m.IndexedBlock.Set(float64(done))
-		ix.m.HeadLag.Set(float64(head - done))
+		ix.m.IndexedBlock.WithLabelValues(ix.label).Set(float64(done))
+		ix.m.HeadLag.WithLabelValues(ix.label).Set(float64(head - done))
 		next = done + 1
 	}
 	return nil
@@ -114,7 +119,7 @@ func (ix *Indexer) Sync(ctx context.Context) error {
 // nextBlock returns the first block to index: after the checkpoint, rewinding
 // first if the checkpoint block is no longer canonical.
 func (ix *Indexer) nextBlock(ctx context.Context, safe uint64) (uint64, error) {
-	cp, ok, err := ix.store.Checkpoint(ctx)
+	cp, ok, err := ix.store.Checkpoint(ctx, ix.cfg.ChainID)
 	if err != nil {
 		return 0, fmt.Errorf("load checkpoint: %w", err)
 	}
@@ -139,10 +144,10 @@ func (ix *Indexer) nextBlock(ctx context.Context, safe uint64) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("get hash of rewind block %d: %w", target, err)
 	}
-	if err := ix.store.Rewind(ctx, domain.Checkpoint{Block: target, Hash: targetHash}); err != nil {
+	if err := ix.store.Rewind(ctx, ix.cfg.ChainID, domain.Checkpoint{Block: target, Hash: targetHash}); err != nil {
 		return 0, fmt.Errorf("rewind to block %d: %w", target, err)
 	}
-	ix.m.Reorgs.Inc()
+	ix.m.Reorgs.WithLabelValues(ix.label).Inc()
 	ix.log.Warn("reorg detected, rewound",
 		"block", cp.Block, "stored_hash", cp.Hash.String(), "canonical_hash", canonical.String(), "rewound_to", target)
 	return target + 1, nil
@@ -151,7 +156,7 @@ func (ix *Indexer) nextBlock(ctx context.Context, safe uint64) (uint64, error) {
 // indexRange indexes [from, to] and returns the last block it committed, which is
 // below to when the node forced the range to shrink.
 func (ix *Indexer) indexRange(ctx context.Context, from, to uint64) (uint64, error) {
-	wallets, err := ix.store.Wallets(ctx)
+	wallets, err := ix.store.WatchedWallets(ctx, ix.cfg.ChainID)
 	if err != nil {
 		return 0, fmt.Errorf("load wallets: %w", err)
 	}
@@ -177,6 +182,7 @@ func (ix *Indexer) indexRange(ctx context.Context, from, to uint64) (uint64, err
 		if err != nil {
 			return 0, fmt.Errorf("evaluate blocks %d-%d: %w", from, to, err)
 		}
+		result.ChainID = ix.cfg.ChainID
 		result.Checkpoint = domain.Checkpoint{Block: to, Hash: toHash}
 		if err := ix.store.CommitRange(ctx, result); err != nil {
 			return 0, fmt.Errorf("commit blocks %d-%d: %w", from, to, err)
@@ -193,9 +199,13 @@ func (ix *Indexer) fetchLogs(ctx context.Context, from, to uint64, wallets []dom
 	if len(wallets) == 0 {
 		return nil, nil
 	}
-	walletTopics := make([]domain.Hash, len(wallets))
-	for i, w := range wallets {
-		walletTopics[i] = erc20.AddressTopic(w.Address)
+	var walletTopics []domain.Hash
+	seenWallet := map[domain.Address]bool{}
+	for _, w := range wallets {
+		if !seenWallet[w.Address] { // several organizations may watch one address
+			seenWallet[w.Address] = true
+			walletTopics = append(walletTopics, erc20.AddressTopic(w.Address))
+		}
 	}
 	queries := []LogQuery{
 		{FromBlock: from, ToBlock: to, Topics: [][]domain.Hash{{erc20.TopicApproval, erc20.TopicTransfer}, walletTopics}},
@@ -231,10 +241,11 @@ func (ix *Indexer) fetchLogs(ctx context.Context, from, to uint64, wallets []dom
 }
 
 // derive decodes logs and runs the risk rules on the events of watched wallets.
+// Each finding becomes one alert per organization that watches the wallet.
 func (ix *Indexer) derive(ctx context.Context, from uint64, logs []domain.Log, wallets []domain.Wallet) (RangeResult, error) {
-	watched := make(map[domain.Address]bool, len(wallets))
+	watched := make(map[domain.Address][]domain.OrgID, len(wallets))
 	for _, w := range wallets {
-		watched[w.Address] = true
+		watched[w.Address] = append(watched[w.Address], w.OrgID)
 	}
 	ev := newEvaluator(ix, from)
 
@@ -252,9 +263,9 @@ func (ix *Indexer) derive(ctx context.Context, from uint64, logs []domain.Log, w
 
 		var wallet domain.Address
 		switch {
-		case e.Kind == domain.KindApproval && watched[e.From]:
+		case e.Kind == domain.KindApproval && len(watched[e.From]) > 0:
 			wallet = e.From
-		case e.Kind == domain.KindTransfer && watched[e.From]:
+		case e.Kind == domain.KindTransfer && len(watched[e.From]) > 0:
 			wallet = e.From
 		default:
 			continue // inflows are recorded but carry no outflow risk
@@ -264,7 +275,9 @@ func (ix *Indexer) derive(ctx context.Context, from uint64, logs []domain.Log, w
 			return RangeResult{}, err
 		}
 		for _, f := range findings {
-			r.Alerts = append(r.Alerts, domain.NewAlert(wallet, e, f))
+			for _, org := range watched[wallet] {
+				r.Alerts = append(r.Alerts, domain.NewAlert(org, ix.cfg.ChainID, wallet, e, f))
+			}
 		}
 	}
 	return r, nil
@@ -274,10 +287,10 @@ func (ix *Indexer) derive(ctx context.Context, from uint64, logs []domain.Log, w
 // counted twice by the process that failed it.
 func (ix *Indexer) record(r RangeResult) {
 	for _, e := range r.Events {
-		ix.m.Events.WithLabelValues(string(e.Kind)).Inc()
+		ix.m.Events.WithLabelValues(ix.label, string(e.Kind)).Inc()
 	}
 	for _, a := range r.Alerts {
-		ix.m.Findings.WithLabelValues(a.Rule).Inc()
+		ix.m.Findings.WithLabelValues(ix.label, a.Rule).Inc()
 	}
 }
 
@@ -364,7 +377,7 @@ func (v *evaluator) recentApprovals(ctx context.Context, wallet domain.Address, 
 	if !ok {
 		since := v.from - min(window, v.from)
 		var err error
-		stored, err = v.ix.store.ApprovalsSince(ctx, wallet, e.Token, since)
+		stored, err = v.ix.store.ApprovalsSince(ctx, v.ix.cfg.ChainID, wallet, e.Token, since)
 		if err != nil {
 			return nil, fmt.Errorf("load approvals of %s on %s: %w", wallet, e.Token, err)
 		}

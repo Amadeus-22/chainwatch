@@ -4,7 +4,7 @@ FORGE    ?= $(shell command -v forge 2>/dev/null || echo $(HOME)/.foundry/bin/fo
 GO_DIRS  := cmd internal migrations
 TEST_DATABASE_URL ?= postgres://chainwatch:chainwatch@localhost:$${CHAINWATCH_PG_PORT:-55432}/chainwatch?sslmode=disable
 
-.PHONY: build test test-integration lint check run docker contracts-test demo clean
+.PHONY: build test test-integration lint check run docker contracts-test demo web web-test web-dev clean
 
 build: ## build bin/chainwatch
 	CGO_ENABLED=0 go build -trimpath -o bin/$(APP) ./cmd/$(APP)
@@ -34,5 +34,14 @@ contracts-test: ## Foundry tests for the demo contracts
 demo: ## end-to-end drain demo on anvil + postgres (see README)
 	./scripts/demo.sh
 
+web: ## build the web app into web/dist (needs Node 20+)
+	cd web && npm ci --no-audit --no-fund && npm run build
+
+web-test: ## web app unit tests (Vitest)
+	cd web && npm test
+
+web-dev: ## web app dev server on :5173, proxying /v1 to CHAINWATCH_API (default 127.0.0.1:8080)
+	cd web && npm run dev
+
 clean:
-	rm -rf bin contracts/out contracts/cache contracts/broadcast
+	rm -rf bin contracts/out contracts/cache contracts/broadcast web/dist

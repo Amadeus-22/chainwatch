@@ -138,16 +138,23 @@ func (c *fakeChain) TxSender(_ context.Context, tx domain.Hash) (domain.Address,
 type fakeStore struct {
 	mu      sync.Mutex
 	wallets []domain.Wallet
-	cp      *domain.Checkpoint
+	cps     map[domain.ChainID]domain.Checkpoint
 	events  map[eventKey]domain.Event
 	alerts  []storedAlert
 	commits int
 }
 
 type eventKey struct {
-	tx  domain.Hash
-	idx uint
+	chain domain.ChainID
+	tx    domain.Hash
+	idx   uint
 }
+
+// testChain and testOrg are what newFakeStore's wallets are watched on and by.
+const (
+	testChain domain.ChainID = 1
+	testOrg   domain.OrgID   = 1
+)
 
 type storedAlert struct {
 	domain.Alert
@@ -156,33 +163,43 @@ type storedAlert struct {
 }
 
 func newFakeStore(wallets ...domain.Address) *fakeStore {
-	s := &fakeStore{events: map[eventKey]domain.Event{}}
+	s := &fakeStore{events: map[eventKey]domain.Event{}, cps: map[domain.ChainID]domain.Checkpoint{}}
 	for _, w := range wallets {
-		s.wallets = append(s.wallets, domain.Wallet{Address: w})
+		s.watch(testOrg, testChain, w)
 	}
 	return s
 }
 
-func (s *fakeStore) Wallets(context.Context) ([]domain.Wallet, error) {
+func (s *fakeStore) watch(org domain.OrgID, chain domain.ChainID, a domain.Address) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return slices.Clone(s.wallets), nil
+	s.wallets = append(s.wallets, domain.Wallet{OrgID: org, ChainID: chain, Address: a})
 }
 
-func (s *fakeStore) Checkpoint(context.Context) (domain.Checkpoint, bool, error) {
+func (s *fakeStore) WatchedWallets(_ context.Context, chain domain.ChainID) ([]domain.Wallet, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cp == nil {
-		return domain.Checkpoint{}, false, nil
+	var out []domain.Wallet
+	for _, w := range s.wallets {
+		if w.ChainID == chain {
+			out = append(out, w)
+		}
 	}
-	return *s.cp, true, nil
+	return out, nil
 }
 
-func (s *fakeStore) ApprovalsSince(_ context.Context, owner, token domain.Address, from uint64) ([]domain.Event, error) {
+func (s *fakeStore) Checkpoint(_ context.Context, chain domain.ChainID) (domain.Checkpoint, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp, ok := s.cps[chain]
+	return cp, ok, nil
+}
+
+func (s *fakeStore) ApprovalsSince(_ context.Context, chain domain.ChainID, owner, token domain.Address, from uint64) ([]domain.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []domain.Event
-	for _, e := range s.sortedEvents() {
+	for _, e := range s.sortedEvents(chain) {
 		if e.Kind == domain.KindApproval && e.From == owner && e.Token == token && e.BlockNumber >= from {
 			out = append(out, e)
 		}
@@ -195,7 +212,7 @@ func (s *fakeStore) CommitRange(_ context.Context, r app.RangeResult) error {
 	defer s.mu.Unlock()
 	s.commits++
 	for _, e := range r.Events {
-		k := eventKey{e.TxHash, e.LogIndex}
+		k := eventKey{r.ChainID, e.TxHash, e.LogIndex}
 		if _, dup := s.events[k]; !dup {
 			s.events[k] = e
 		}
@@ -207,36 +224,35 @@ func (s *fakeStore) CommitRange(_ context.Context, r app.RangeResult) error {
 		a.ID = int64(len(s.alerts) + 1)
 		s.alerts = append(s.alerts, storedAlert{Alert: a})
 	}
-	cp := r.Checkpoint
-	s.cp = &cp
+	s.cps[r.ChainID] = r.Checkpoint
 	return nil
 }
 
 func (s *fakeStore) findAlert(a domain.Alert) int {
 	for i, x := range s.alerts {
-		if x.Rule == a.Rule && x.TxHash == a.TxHash && x.LogIndex == a.LogIndex {
+		if x.OrgID == a.OrgID && x.ChainID == a.ChainID && x.Rule == a.Rule && x.TxHash == a.TxHash && x.LogIndex == a.LogIndex {
 			return i
 		}
 	}
 	return -1
 }
 
-func (s *fakeStore) Rewind(_ context.Context, to domain.Checkpoint) error {
+func (s *fakeStore) Rewind(_ context.Context, chain domain.ChainID, to domain.Checkpoint) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, e := range s.events {
-		if e.BlockNumber > to.Block {
+		if k.chain == chain && e.BlockNumber > to.Block {
 			delete(s.events, k)
 		}
 	}
 	kept := s.alerts[:0]
 	for _, a := range s.alerts {
-		if a.BlockNumber <= to.Block || a.Status == domain.AlertDelivered {
+		if a.ChainID != chain || a.BlockNumber <= to.Block || a.Status == domain.AlertDelivered {
 			kept = append(kept, a)
 		}
 	}
 	s.alerts = kept
-	s.cp = &to
+	s.cps[chain] = to
 	return nil
 }
 
@@ -292,10 +308,12 @@ func (s *fakeStore) CountPendingAlerts(context.Context) (int, error) {
 	return n, nil
 }
 
-func (s *fakeStore) sortedEvents() []domain.Event {
+func (s *fakeStore) sortedEvents(chain domain.ChainID) []domain.Event {
 	out := make([]domain.Event, 0, len(s.events))
-	for _, e := range s.events {
-		out = append(out, e)
+	for k, e := range s.events {
+		if k.chain == chain {
+			out = append(out, e)
+		}
 	}
 	slices.SortFunc(out, func(a, b domain.Event) int {
 		if a.Before(b) {
@@ -310,7 +328,20 @@ func (s *fakeStore) sortedEvents() []domain.Event {
 }
 
 func (s *fakeStore) snapshot() (events []domain.Event, alerts []storedAlert, cp *domain.Checkpoint) {
+	return s.snapshotChain(testChain)
+}
+
+// snapshotChain returns one chain's events, its alerts and its checkpoint.
+func (s *fakeStore) snapshotChain(chain domain.ChainID) (events []domain.Event, alerts []storedAlert, cp *domain.Checkpoint) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sortedEvents(), slices.Clone(s.alerts), s.cp
+	for _, a := range s.alerts {
+		if a.ChainID == chain {
+			alerts = append(alerts, a)
+		}
+	}
+	if c, ok := s.cps[chain]; ok {
+		cp = &c
+	}
+	return s.sortedEvents(chain), alerts, cp
 }

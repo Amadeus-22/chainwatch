@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -21,6 +22,7 @@ import (
 	"github.com/Amadeus-22/chainwatch/internal/adapter/notify"
 	"github.com/Amadeus-22/chainwatch/internal/adapter/postgres"
 	"github.com/Amadeus-22/chainwatch/internal/app"
+	"github.com/Amadeus-22/chainwatch/internal/domain"
 	"github.com/Amadeus-22/chainwatch/internal/domain/risk"
 	"github.com/Amadeus-22/chainwatch/internal/platform/config"
 	"github.com/Amadeus-22/chainwatch/internal/platform/logging"
@@ -29,7 +31,12 @@ import (
 
 var version = "dev"
 
-var _ httpapi.Store = (*postgres.Store)(nil)
+// Sign-in timing: a nonce is good for one sign-in within NonceTTL; clocks of the
+// browser and the server may differ by clockSkew.
+const (
+	nonceTTL  = 10 * time.Minute
+	clockSkew = time.Minute
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -39,7 +46,7 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.Load(os.Getenv)
+	cfg, err := config.Load(os.Getenv, os.ReadFile)
 	if err != nil {
 		return err
 	}
@@ -62,25 +69,49 @@ func run() error {
 		return err
 	}
 
-	chain := ethrpc.New(cfg.RPCURL, cfg.RPCTimeout, m)
-	indexer := app.NewIndexer(chain, store, app.IndexerConfig{
-		Confirmations: cfg.Confirmations,
-		ReorgWindow:   cfg.ReorgWindow,
-		MaxBlockRange: cfg.MaxBlockRange,
-		StartBlock:    cfg.StartBlock,
-		PollInterval:  cfg.PollInterval,
-		Risk:          risk.Params{LargeOutflow: cfg.LargeOutflow, DrainWindow: cfg.DrainWindow},
-	}, log.With("component", "indexer"), m)
+	checks := []httpapi.Check{{Name: "postgres", Fn: store.Ping}}
+	var indexers []*app.Indexer
+	var chains []domain.Chain
+	var chainIDs []domain.ChainID
+	for _, c := range cfg.Chains {
+		client := ethrpc.New(c.RPCURL, c.ID, cfg.RPCTimeout, m)
+		checks = append(checks, httpapi.Check{Name: fmt.Sprintf("rpc_%d", c.ID), Fn: client.Ping})
+		indexers = append(indexers, app.NewIndexer(client, store, app.IndexerConfig{
+			ChainID:       c.ID,
+			Confirmations: c.Confirmations,
+			ReorgWindow:   c.ReorgWindow,
+			MaxBlockRange: c.MaxBlockRange,
+			StartBlock:    c.StartBlock,
+			PollInterval:  c.PollInterval,
+			Risk:          risk.Params{LargeOutflow: c.LargeOutflow, DrainWindow: cfg.DrainWindow},
+		}, log.With("component", "indexer", "chain_id", uint64(c.ID), "chain", c.Name), m))
+		chains = append(chains, domain.Chain{ID: c.ID, Name: c.Name, ExplorerURL: c.ExplorerURL})
+		chainIDs = append(chainIDs, c.ID)
+		log.Info("chain configured", "chain_id", uint64(c.ID), "chain", c.Name,
+			"confirmations", c.Confirmations, "reorg_window", c.ReorgWindow)
+	}
 	alerter := app.NewAlerter(store, newNotifier(cfg, log), cfg.NotifyInterval, log.With("component", "alerter"), m)
-
-	checks := []httpapi.Check{{Name: "postgres", Fn: store.Ping}, {Name: "rpc", Fn: chain.Ping}}
-	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.NewHandler(store, checks, reg, log.With("component", "http")))
+	auth := app.NewAuth(store, store, app.AuthConfig{
+		Domain: cfg.SIWEDomain, ChainIDs: chainIDs, NonceTTL: nonceTTL, SessionTTL: cfg.SessionTTL, ClockSkew: clockSkew,
+	})
+	server := httpapi.NewServer(cfg.HTTPAddr, httpapi.NewHandler(httpapi.Config{
+		Auth:         auth,
+		Workspace:    app.NewWorkspace(store, chains),
+		Checks:       checks,
+		Gatherer:     reg,
+		Log:          log.With("component", "http"),
+		Domain:       cfg.SIWEDomain,
+		CookieSecure: cfg.CookieSecure,
+		WebDir:       cfg.WebDir,
+	}))
 
 	log.Info("chainwatch starting", "version", version, "http_addr", cfg.HTTPAddr,
-		"confirmations", cfg.Confirmations, "reorg_window", cfg.ReorgWindow)
+		"chains", len(cfg.Chains), "siwe_domain", cfg.SIWEDomain)
 
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return indexer.Run(gctx) })
+	for _, ix := range indexers {
+		g.Go(func() error { return ix.Run(gctx) })
+	}
 	g.Go(func() error { return alerter.Run(gctx) })
 	g.Go(func() error {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

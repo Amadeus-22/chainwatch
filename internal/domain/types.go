@@ -14,8 +14,8 @@ import (
 type Address [20]byte
 
 // ParseAddress accepts a 0x-prefixed, 40-hex-digit address in any letter case.
-// The EIP-55 checksum is not verified: computing it needs Keccak-256, which is not
-// in the standard library (see docs/adr/0003-no-abi-library.md).
+// The EIP-55 checksum is not verified here (API input may be lowercase); sign-in
+// messages require it through ethsig.ParseChecksummed.
 func ParseAddress(s string) (Address, error) {
 	var a Address
 	if err := decodeFixedHex(s, a[:]); err != nil {
@@ -129,16 +129,33 @@ func (e Event) Before(o Event) bool {
 	return e.LogIndex < o.LogIndex
 }
 
-// Wallet is an address on the watch list.
+// ChainID is an EIP-155 chain id (1 Ethereum, 8453 Base, 42161 Arbitrum One,
+// 137 Polygon PoS, 31337 anvil).
+type ChainID uint64
+
+// Chain describes one configured EVM network. The RPC URL is not part of it: it
+// may carry an API key and stays in the adapter that dials it.
+type Chain struct {
+	ID          ChainID
+	Name        string
+	ExplorerURL string // optional, e.g. https://etherscan.io
+}
+
+// Wallet is an address an organization watches on one chain. The same address may
+// be watched by several organizations and on several chains; each pair is its
+// own Wallet.
 type Wallet struct {
-	Address   Address   `json:"address"`
-	Label     string    `json:"label"`
-	CreatedAt time.Time `json:"created_at"`
+	OrgID     OrgID
+	ChainID   ChainID
+	Address   Address
+	Label     string
+	CreatedAt time.Time
 }
 
 // Allowance is the last approved amount an owner granted a spender on a token: the
 // owner's current exposure to that spender, as far as Approval events tell.
 type Allowance struct {
+	ChainID      ChainID
 	Owner        Address
 	Token        Address
 	Spender      Address
@@ -176,10 +193,13 @@ const (
 	AlertDelivered AlertStatus = "delivered"
 )
 
-// Alert is a persisted finding about a watched wallet. It is unique per
-// (Rule, TxHash, LogIndex), which makes re-indexing a range harmless.
+// Alert is a persisted finding about a wallet watched by one organization. It is
+// unique per (OrgID, ChainID, Rule, TxHash, LogIndex), which makes re-indexing a
+// range harmless; two organizations watching the same wallet get one alert each.
 type Alert struct {
 	ID          int64
+	OrgID       OrgID
+	ChainID     ChainID
 	Wallet      Address
 	Rule        string
 	Severity    Severity
@@ -197,12 +217,15 @@ type Alert struct {
 // DedupKey identifies the alert across processes and retries. Notifiers send it so
 // receivers can drop a redelivery after a crash between send and acknowledgement.
 func (a Alert) DedupKey() string {
-	return fmt.Sprintf("%s:%s:%d", a.Rule, a.TxHash, a.LogIndex)
+	return fmt.Sprintf("%d:%d:%s:%s:%d", a.OrgID, a.ChainID, a.Rule, a.TxHash, a.LogIndex)
 }
 
-// NewAlert builds a pending alert for wallet from a finding on event ev.
-func NewAlert(wallet Address, ev Event, f Finding) Alert {
+// NewAlert builds a pending alert for org about wallet on chain from a finding on
+// event ev.
+func NewAlert(org OrgID, chain ChainID, wallet Address, ev Event, f Finding) Alert {
 	return Alert{
+		OrgID:       org,
+		ChainID:     chain,
 		Wallet:      wallet,
 		Rule:        f.Rule,
 		Severity:    f.Severity,

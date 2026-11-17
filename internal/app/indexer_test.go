@@ -67,6 +67,7 @@ func newHarness(head uint64) *harness {
 		reg:   reg,
 		m:     metrics.New(reg),
 		cfg: app.IndexerConfig{
+			ChainID:       testChain,
 			Confirmations: 0,
 			ReorgWindow:   4,
 			MaxBlockRange: 100,
@@ -128,13 +129,13 @@ func TestSyncDetectsDrainScenario(t *testing.T) {
 	if cp == nil || cp.Block != 10 || cp.Hash != h.chain.hashAt(10) {
 		t.Fatalf("checkpoint = %+v, want block 10 with its hash", cp)
 	}
-	if got := testutil.ToFloat64(h.m.IndexedBlock); got != 10 {
+	if got := testutil.ToFloat64(h.m.IndexedBlock.WithLabelValues("1")); got != 10 {
 		t.Errorf("indexed_block = %v, want 10", got)
 	}
-	if got := testutil.ToFloat64(h.m.Events.WithLabelValues("approval")); got != 2 {
+	if got := testutil.ToFloat64(h.m.Events.WithLabelValues("1", "approval")); got != 2 {
 		t.Errorf("events_total{kind=approval} = %v, want 2", got)
 	}
-	if got := testutil.ToFloat64(h.m.Findings.WithLabelValues(risk.RuleDrainPattern)); got != 1 {
+	if got := testutil.ToFloat64(h.m.Findings.WithLabelValues("1", risk.RuleDrainPattern)); got != 1 {
 		t.Errorf("findings_total{rule=drain_pattern} = %v, want 1", got)
 	}
 }
@@ -275,7 +276,7 @@ func TestSyncRewindsOnReorg(t *testing.T) {
 	if cp.Block != 12 || cp.Hash != h.chain.hashAt(12) {
 		t.Fatalf("checkpoint = %+v, want block 12 on the new fork", cp)
 	}
-	if got := testutil.ToFloat64(h.m.Reorgs); got != 1 {
+	if got := testutil.ToFloat64(h.m.Reorgs.WithLabelValues("1")); got != 1 {
 		t.Fatalf("reorgs_total = %v, want 1", got)
 	}
 	// Rewind went ReorgWindow (4) blocks back from the checkpoint at 10.
@@ -299,7 +300,7 @@ func TestReprocessingIsIdempotent(t *testing.T) {
 
 	// Move the checkpoint back without deleting anything, as when an operator
 	// replays a range or two instances briefly overlap: every row already exists.
-	h.store.cp = &domain.Checkpoint{Block: 0, Hash: h.chain.hashAt(0)}
+	h.store.cps[testChain] = domain.Checkpoint{Block: 0, Hash: h.chain.hashAt(0)}
 	h.sync(t)
 	h.sync(t) // and a no-op sync on top
 

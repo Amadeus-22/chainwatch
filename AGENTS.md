@@ -16,6 +16,7 @@ Do not read the README, ADRs or other packages unless the task is about them.
 - Search before reading: `grep -rn "Symbol" internal/` or `rg`.
 - Read line ranges, not whole files, when a file is over ~150 lines.
 - Never open: `go.sum`, `bin/`, `vendor/`, `contracts/lib/`, `contracts/out/`,
+  `web/node_modules/`, `web/dist/`, `web/package-lock.json`,
   `testdata/` fixtures larger than a screen.
 - Do not re-read a file you just edited to "check" it; run the tests instead.
 

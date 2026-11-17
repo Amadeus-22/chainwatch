@@ -32,8 +32,8 @@ func NewTelegram(baseURL, botToken, chatID string, opts Options) *Telegram {
 
 // Notify sends the alert as a plain-text message.
 func (t *Telegram) Notify(ctx context.Context, a domain.Alert) error {
-	text := fmt.Sprintf("[%s] %s\n%s\nwallet %s\ntx %s (block %d)",
-		strings.ToUpper(string(a.Severity)), a.Rule, a.Reason, a.Wallet, a.TxHash, a.BlockNumber)
+	text := fmt.Sprintf("[%s] %s\n%s\norganization %d, chain %d\nwallet %s\ntx %s (block %d)",
+		strings.ToUpper(string(a.Severity)), a.Rule, a.Reason, a.OrgID, a.ChainID, a.Wallet, a.TxHash, a.BlockNumber)
 	body, err := json.Marshal(map[string]any{"chat_id": t.chatID, "text": text, "disable_web_page_preview": true})
 	if err != nil {
 		return fmt.Errorf("encode telegram message: %w", err)

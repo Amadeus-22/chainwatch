@@ -88,11 +88,12 @@ func TestEventBefore(t *testing.T) {
 
 func TestNewAlertAndDedupKey(t *testing.T) {
 	ev := domain.Event{Token: domain.Address{1}, TxHash: domain.Hash{31: 0xab}, LogIndex: 3, BlockNumber: 7, Amount: big.NewInt(1)}
-	a := domain.NewAlert(domain.Address{2}, ev, domain.Finding{Rule: "r", Severity: domain.SeverityHigh, Reason: "why"})
-	if a.Status != domain.AlertPending || a.BlockNumber != 7 || a.Token != ev.Token || a.Wallet != (domain.Address{2}) {
+	a := domain.NewAlert(9, 8453, domain.Address{2}, ev, domain.Finding{Rule: "r", Severity: domain.SeverityHigh, Reason: "why"})
+	if a.Status != domain.AlertPending || a.BlockNumber != 7 || a.Token != ev.Token || a.Wallet != (domain.Address{2}) ||
+		a.OrgID != 9 || a.ChainID != 8453 {
 		t.Fatalf("unexpected alert: %+v", a)
 	}
-	want := "r:0x00000000000000000000000000000000000000000000000000000000000000ab:3"
+	want := "9:8453:r:0x00000000000000000000000000000000000000000000000000000000000000ab:3"
 	if a.DedupKey() != want {
 		t.Fatalf("DedupKey = %s, want %s", a.DedupKey(), want)
 	}

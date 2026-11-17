@@ -55,6 +55,12 @@ Dependency rule: `domain` ← `app` ← `adapter` ← `cmd`. Never the other way
 `github.com/jackc/pgx/v5`, `modernc.org/sqlite` (pure Go, no cgo),
 `golang.org/x/sync`, `gopkg.in/yaml.v3`. Anything else needs an ADR.
 
+Allowed by ADR in one repository only:
+
+- `chainwatch`: `golang.org/x/crypto` (only `sha3.NewLegacyKeccak256`) and
+  `github.com/decred/dcrd/dcrec/secp256k1/v4` (signature recovery), both confined
+  to `internal/domain/ethsig` — see chainwatch `docs/adr/0006-sign-in-with-ethereum.md`.
+
 ## HTTP APIs
 
 - Versioned under `/v1`. JSON in and out. Errors as
